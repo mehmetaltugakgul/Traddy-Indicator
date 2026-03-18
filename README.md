@@ -2,6 +2,7 @@
 
 TradingView **Pine Script v5** overlay: KAMA, Bollinger, squeeze, a **weighted multi-indicator consensus** (−100% … +100%), **swing DIP/PEAK** markers, optional **consensus tier** shapes, **EXIT** logic, bottom **RSI · MACD · Stochastic** strips, dashboard, and alerts.
 
+![Traddy](Traddy.png)
 
 ## Features (summary)
 

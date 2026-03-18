@@ -1,5 +1,6 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 //@version=5
+// Created by Altuğ Akgül 
 indicator("TRADDY The Best Indicator of The World", shorttitle="TRADDY", overlay=true, max_labels_count=500, max_lines_count=500)
 
 //══════════════════════════════════════════════════════════════════════════════

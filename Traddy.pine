@@ -1,0 +1,757 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=5
+indicator("TRADDY The Best Indicator of The World", shorttitle="TRADDY", overlay=true, max_labels_count=500, max_lines_count=500)
+
+//══════════════════════════════════════════════════════════════════════════════
+// SCORE THRESHOLDS
+//══════════════════════════════════════════════════════════════════════════════
+var string G_SC = "1) Score thresholds"
+thStrongBuy  = input.float(62, "STRONG BUY: net % ≥", minval=30, maxval=90, group=G_SC)
+thBuy        = input.float(35, "BUY: net % ≥", minval=5, maxval=50, group=G_SC)
+thSell       = input.float(-35, "SELL: net % ≤", maxval=-5, minval=-50, group=G_SC)
+thStrongSell = input.float(-62, "STRONG SELL: net % ≤", maxval=-30, minval=-90, group=G_SC)
+useChopDamp  = input.bool(true, "Dampen score when chop is high", group=G_SC)
+chopLen      = input.int(14, "Choppiness length", minval=5, group=G_SC)
+chopHi       = input.float(61.8, "Chop upper threshold", minval=50, maxval=80, group=G_SC)
+
+//══════════════════════════════════════════════════════════════════════════════
+// CHART SIGNALS — default: swing DIP/PEAK (few); optional consensus tier spam
+//══════════════════════════════════════════════════════════════════════════════
+var string G_SIG = "2) Chart signals"
+sigMode        = input.string("Swing DIP / PEAK", "Mode", options=["Swing DIP / PEAK", "Consensus tiers"], group=G_SIG)
+swingDensity   = input.string("Balanced", "DIP/PEAK density", options=["Sparse (few majors)", "Balanced", "More (medium swings)", "Custom (inputs below)"], tooltip="Sparse = rare big swings. Balanced = middle ground. More = extra sub-swings. Custom = full control.", group=G_SIG)
+showSwing      = input.bool(true, "Show DIP & PEAK markers", group=G_SIG)
+dipLeft        = input.int(5, "DIP: pivot left (Custom only)", minval=2, maxval=25, group=G_SIG)
+dipRight       = input.int(5, "DIP: pivot right (Custom)", minval=2, maxval=25, group=G_SIG)
+peakLeft       = input.int(5, "PEAK: pivot left (Custom)", minval=2, maxval=25, group=G_SIG)
+peakRight      = input.int(5, "PEAK: pivot right (Custom)", minval=2, maxval=25, group=G_SIG)
+minBarsSwing   = input.int(14, "Min bars between DIP/PEAK (Custom)", minval=8, maxval=120, group=G_SIG)
+dipRsiMax      = input.float(45, "DIP: RSI ≤ at swing (Custom)", minval=15, maxval=55, group=G_SIG)
+dipNearBB      = input.bool(true, "DIP: near lower BB (Custom)", group=G_SIG)
+dipNetMax      = input.float(22, "DIP: net % ≤ at swing (Custom)", minval=-50, maxval=45, group=G_SIG)
+peakRsiMin     = input.float(55, "PEAK: RSI ≥ at swing (Custom)", minval=45, maxval=85, group=G_SIG)
+peakNearBB     = input.bool(true, "PEAK: near upper BB (Custom)", group=G_SIG)
+peakNetMin     = input.float(-22, "PEAK: net % ≥ at swing (Custom)", minval=-45, maxval=50, group=G_SIG)
+noChopSwing    = input.bool(true, "Block DIP/PEAK in high chop (Custom)", group=G_SIG)
+dipNoKnife     = input.bool(true, "DIP: block falling-knife (bounce + bear filter)", tooltip="Stops chains of DIP while price keeps making new lows. Needs a bounce from prior DIP; in bear trend (below falling KAMA) only extreme RSI qualifies.", group=G_SIG)
+dipBouncePct   = input.float(4.5, "DIP: min rebound % from prior DIP low", minval=1.0, maxval=25.0, step=0.5, group=G_SIG)
+dipBearRsiMax  = input.float(32, "DIP: max RSI when below falling KAMA", minval=18, maxval=45, step=1, group=G_SIG)
+swingAlternate = input.bool(true, "No PEAK until after a DIP", tooltip="Blocks many red PEAK labels in one uptrend; next PEAK only after a green DIP.", group=G_SIG)
+
+showConsensus  = input.bool(false, "Also show consensus tier shapes", group=G_SIG)
+consPosDisc    = input.bool(true, "Consensus: 1 entry until EXIT/SELL (no BUY spam)", tooltip="After BUY/STRONG BUY, no repeat until SELL/EXIT. After SELL, same for shorts.", group=G_SIG)
+showExitLbl    = input.bool(true, "Show EXIT (stop / trim) on KAMA cross or score fade", group=G_SIG)
+exitLongNet    = input.float(18, "EXIT long: net % cross below (one shot)", minval=5, maxval=40, group=G_SIG)
+sigOnClose     = input.bool(true, "Bar close only", group=G_SIG)
+sigChangeOnly  = input.bool(true, "Consensus: tier change only", group=G_SIG)
+showAlSatLbl   = input.bool(true, "Text labels on markers", group=G_SIG)
+sigSize        = input.string("normal", "Label size", options=["tiny", "small", "normal"], group=G_SIG)
+zoneBg         = input.bool(false, "Tint background in buy/sell zone", group=G_SIG)
+
+lblSz = sigSize == "tiny" ? size.tiny : sigSize == "small" ? size.small : size.normal
+showAlSat = showConsensus or sigMode == "Consensus tiers"
+
+//══════════════════════════════════════════════════════════════════════════════
+// SCORE WEIGHTS
+//══════════════════════════════════════════════════════════════════════════════
+var string G_W = "3) Score weights (0=off)"
+w_macd = input.float(6, "MACD", minval=0, maxval=15, step=0.5, group=G_W)
+w_rsi  = input.float(5, "RSI", minval=0, maxval=15, step=0.5, group=G_W)
+w_kama = input.float(5, "KAMA", minval=0, maxval=15, step=0.5, group=G_W)
+w_bb   = input.float(4, "Bollinger %B", minval=0, maxval=15, step=0.5, group=G_W)
+w_st   = input.float(4, "Stochastic", minval=0, maxval=15, step=0.5, group=G_W)
+w_cci  = input.float(3, "CCI", minval=0, maxval=15, step=0.5, group=G_W)
+w_wpr  = input.float(3, "Williams %R", minval=0, maxval=15, step=0.5, group=G_W)
+w_mfi  = input.float(4, "MFI", minval=0, maxval=15, step=0.5, group=G_W)
+w_adx  = input.float(5, "ADX / DI", minval=0, maxval=15, step=0.5, group=G_W)
+w_ppo  = input.float(4, "PPO", minval=0, maxval=15, step=0.5, group=G_W)
+w_ao   = input.float(3, "Awesome Osc.", minval=0, maxval=15, step=0.5, group=G_W)
+w_uo   = input.float(3, "Ultimate Osc.", minval=0, maxval=15, step=0.5, group=G_W)
+w_efi  = input.float(3, "Force Index", minval=0, maxval=15, step=0.5, group=G_W)
+w_obv  = input.float(4, "OBV slope", minval=0, maxval=15, step=0.5, group=G_W)
+w_tr   = input.float(4, "TSI + ROC", minval=0, maxval=15, step=0.5, group=G_W)
+w_cmo  = input.float(3, "CMO", minval=0, maxval=15, step=0.5, group=G_W)
+w_sr   = input.float(4, "Stoch RSI", minval=0, maxval=15, step=0.5, group=G_W)
+w_vw   = input.float(3, "VWAP %", minval=0, maxval=15, step=0.5, group=G_W)
+w_fish = input.float(4, "Fisher", minval=0, maxval=15, step=0.5, group=G_W)
+w_trx  = input.float(4, "TRIX", minval=0, maxval=15, step=0.5, group=G_W)
+w_dpo  = input.float(3, "DPO", minval=0, maxval=15, step=0.5, group=G_W)
+w_vtx  = input.float(4, "Vortex", minval=0, maxval=15, step=0.5, group=G_W)
+w_eld  = input.float(4, "Elder Ray", minval=0, maxval=15, step=0.5, group=G_W)
+w_rvi  = input.float(3, "RVI", minval=0, maxval=15, step=0.5, group=G_W)
+w_cr   = input.float(4, "Connors-RSI*", minval=0, maxval=15, step=0.5, group=G_W)
+w_sqzF = input.float(2, "Squeeze pop", minval=0, maxval=10, step=0.5, group=G_W)
+w_er   = input.float(3, "KAMA ER", minval=0, maxval=15, step=0.5, group=G_W)
+vwapIgn = input.float(0.15, "VWAP neutral band % (inside=0 pts)", minval=0.01, step=0.05, group=G_W)
+
+//══════════════════════════════════════════════════════════════════════════════
+// KAMA
+//══════════════════════════════════════════════════════════════════════════════
+var string G_KAMA = "4) KAMA"
+kamaLen = input.int(21, "Efficiency length", minval=1, group=G_KAMA)
+kFast   = input.float(0.666, "Fast SC", minval=0.001, maxval=1, step=0.001, group=G_KAMA)
+kSlow   = input.float(0.0645, "Slow SC", minval=0.001, maxval=1, step=0.001, group=G_KAMA)
+erMin   = input.float(0.45, "ER min (below=ER score neutral)", minval=0.1, maxval=0.9, step=0.05, group=G_KAMA)
+srcK    = input.source(close, "Source", group=G_KAMA)
+xv = math.abs(srcK - srcK[1])
+nn = math.sum(xv, kamaLen)
+er = nn != 0 ? math.abs(srcK - srcK[kamaLen]) / nn : 0.0
+sc = math.pow(er * (kFast - kSlow) + kSlow, 2)
+var float kama = na
+kama := na(kama[1]) ? srcK : kama[1] + sc * (srcK - kama[1])
+
+//══════════════════════════════════════════════════════════════════════════════
+// BOLLINGER
+//══════════════════════════════════════════════════════════════════════════════
+var string G_BB = "5) Bollinger + squeeze"
+bbLen    = input.int(20, "Length", minval=1, group=G_BB)
+bbMult   = input.float(2.0, "Std dev mult.", minval=0.1, step=0.1, group=G_BB)
+bbPctLo  = input.float(0.25, "%B oversold (buy bias)", minval=0.05, maxval=0.45, step=0.05, group=G_BB)
+bbPctHi  = input.float(0.75, "%B overbought (sell bias)", minval=0.55, maxval=0.95, step=0.05, group=G_BB)
+sqzN     = input.int(20, "Keltner length", minval=1, group=G_BB)
+sqzM     = input.float(1.5, "Keltner ATR mult.", minval=0.1, step=0.1, group=G_BB)
+showSqz  = input.bool(true, "Squeeze background", group=G_BB)
+bbMid = ta.sma(close, bbLen)
+bbDev = bbMult * ta.stdev(close, bbLen)
+bbU   = bbMid + bbDev
+bbL   = bbMid - bbDev
+pctB  = (bbU - bbL) != 0 ? (close - bbL) / (bbU - bbL) : 0.5
+kcM   = ta.ema(close, sqzN)
+kcR   = sqzM * ta.atr(sqzN)
+sqz   = bbU < kcM + kcR and bbL > kcM - kcR
+sqzFire = sqz[1] and not sqz
+
+//══════════════════════════════════════════════════════════════════════════════
+// RSI
+//══════════════════════════════════════════════════════════════════════════════
+var string G_RSI = "6) RSI"
+rsiLen  = input.int(14, "Length", minval=1, group=G_RSI)
+rsiOb   = input.float(70, "Overbought", minval=50, maxval=95, group=G_RSI)
+rsiOs   = input.float(30, "Oversold", minval=5, maxval=50, group=G_RSI)
+rsiHi   = input.float(52, "Above = buy bias (if not OB)", minval=50, maxval=65, step=1, group=G_RSI)
+rsiLo   = input.float(48, "Below = sell bias (if not OS)", minval=35, maxval=50, step=1, group=G_RSI)
+rsi     = ta.rsi(close, rsiLen)
+
+//══════════════════════════════════════════════════════════════════════════════
+// MACD
+//══════════════════════════════════════════════════════════════════════════════
+var string G_MACD = "7) MACD"
+mFast = input.int(12, "Fast EMA", minval=1, group=G_MACD)
+mSlow = input.int(26, "Slow EMA", minval=1, group=G_MACD)
+mSig  = input.int(9, "Signal", minval=1, group=G_MACD)
+[macdL, macdS, macdH] = ta.macd(close, mFast, mSlow, mSig)
+
+//══════════════════════════════════════════════════════════════════════════════
+// STOCHASTIC
+//══════════════════════════════════════════════════════════════════════════════
+var string G_ST = "8) Stochastic"
+stLen = input.int(14, "%K length", minval=1, group=G_ST)
+stSmK = input.int(3, "K smooth", minval=1, group=G_ST)
+stSmD = input.int(3, "D smooth", minval=1, group=G_ST)
+stOb  = input.float(80, "Overbought", minval=65, maxval=95, group=G_ST)
+stOs  = input.float(20, "Oversold", minval=5, maxval=35, group=G_ST)
+stMid = input.float(30, "Mid lower", minval=20, maxval=40, group=G_ST)
+stMidH = input.float(70, "Mid upper", minval=60, maxval=80, group=G_ST)
+stKraw = ta.stoch(high, low, close, stLen)
+stK    = ta.sma(stKraw, stSmK)
+stD    = ta.sma(stK, stSmD)
+
+//══════════════════════════════════════════════════════════════════════════════
+// CCI · W%R · MFI · ADX
+//══════════════════════════════════════════════════════════════════════════════
+var string G_CCI = "9) CCI"
+cciLen = input.int(20, "Length", minval=1, group=G_CCI)
+cciOb  = input.float(100, "Overbought level", minval=50, group=G_CCI)
+cciOs  = input.float(100, "Oversold level", minval=50, group=G_CCI)
+cci    = ta.cci(hlc3, cciLen)
+
+var string G_WPR = "10) Williams %R"
+wprLen = input.int(14, "Length", minval=1, group=G_WPR)
+wprOb  = input.float(25, "Overbought line (~-20 to -25)", minval=10, maxval=35, step=1, group=G_WPR)
+wprOs  = input.float(75, "Oversold line (~-75 to -80)", minval=65, maxval=90, step=1, group=G_WPR)
+wpr    = ta.wpr(wprLen)
+
+var string G_MFI = "11) MFI"
+mfiLen = input.int(14, "Length", minval=1, group=G_MFI)
+mfiOb  = input.float(78, "Overbought", minval=60, maxval=95, group=G_MFI)
+mfiOs  = input.float(22, "Oversold", minval=5, maxval=40, group=G_MFI)
+mfi    = ta.mfi(hlc3, mfiLen)
+
+var string G_ADX = "12) ADX"
+adxN    = input.int(14, "Length", minval=1, group=G_ADX)
+adxMin  = input.float(18, "Min ADX (below=neutral)", minval=5, maxval=40, group=G_ADX)
+[dip, dim, adx] = ta.dmi(adxN, adxN)
+
+//══════════════════════════════════════════════════════════════════════════════
+// ROC · TSI · CMO · StochRSI
+//══════════════════════════════════════════════════════════════════════════════
+var string G_ROC = "13) ROC"
+rocLen = input.int(12, "Length", minval=1, group=G_ROC)
+roc    = ta.roc(close, rocLen)
+
+var string G_TSI = "14) TSI"
+tsiL = input.int(25, "Long", minval=1, group=G_TSI)
+tsiS = input.int(13, "Short", minval=1, group=G_TSI)
+tsi  = ta.tsi(close, tsiL, tsiS)
+
+var string G_CMO = "15) CMO"
+cmoLen = input.int(14, "Length", minval=1, group=G_CMO)
+cmoTh  = input.float(25, "Strength threshold", minval=10, maxval=50, group=G_CMO)
+cmo    = ta.cmo(close, cmoLen)
+
+var string G_SRSI = "16) Stoch RSI"
+srRsiLen = input.int(14, "RSI length", minval=1, group=G_SRSI)
+srStLen  = input.int(14, "Stoch length", minval=1, group=G_SRSI)
+srKsm    = input.int(3, "K smooth", minval=1, group=G_SRSI)
+srOb     = input.float(78, "Upper band", minval=60, maxval=95, group=G_SRSI)
+srOs     = input.float(22, "Lower band", minval=5, maxval=40, group=G_SRSI)
+rsiSt    = ta.rsi(close, srRsiLen)
+srsiK    = ta.sma(ta.stoch(rsiSt, rsiSt, rsiSt, srStLen), srKsm)
+
+//══════════════════════════════════════════════════════════════════════════════
+// PPO · AO · UO · EFI · OBV · ATR
+//══════════════════════════════════════════════════════════════════════════════
+var string G_AO = "17) Awesome Oscillator"
+aoFast = input.int(5, "Fast SMA", minval=1, group=G_AO)
+aoSlow = input.int(34, "Slow SMA", minval=1, group=G_AO)
+emaF   = ta.ema(close, mFast)
+emaSl  = ta.ema(close, mSlow)
+ppo    = emaSl != 0 ? 100.0 * (emaF - emaSl) / emaSl : 0.0
+ao     = ta.sma(hl2, aoFast) - ta.sma(hl2, aoSlow)
+
+var string G_UO = "18) Ultimate Oscillator"
+uoP1 = input.int(7, "Period 1", minval=2, group=G_UO)
+uoP2 = input.int(14, "Period 2", minval=2, group=G_UO)
+uoP3 = input.int(28, "Period 3", minval=2, group=G_UO)
+uoLo = input.float(38, "Low (buy bias)", minval=20, maxval=45, group=G_UO)
+uoHi = input.float(62, "High (sell bias)", minval=55, maxval=80, group=G_UO)
+uoBp = math.min(low, close[1])
+uoTr = math.max(high, close[1]) - math.min(low, close[1])
+uoR(int l) =>
+    sT = math.sum(uoTr, l)
+    sT != 0 ? math.sum(close - uoBp, l) / sT : 0.0
+uo = 100.0 * (4.0 * uoR(uoP1) + 2.0 * uoR(uoP2) + uoR(uoP3)) / 7.0
+
+var string G_EFI = "19) Force Index"
+efiLen = input.int(13, "EMA length", minval=1, group=G_EFI)
+efi    = ta.ema((close - close[1]) * volume, efiLen)
+
+var string G_OBV = "20) OBV slope"
+obvLb = input.int(5, "Lookback bars", minval=1, maxval=30, group=G_OBV)
+obv   = ta.obv
+obvSl = obv - obv[obvLb]
+
+var string G_ATR = "21) ATR (info)"
+atrLen = input.int(14, "Length", minval=1, group=G_ATR)
+atrPct = close != 0 ? 100.0 * ta.atr(atrLen) / close : na
+
+v       = ta.vwap
+vwapPct = v != 0 ? 100.0 * (close - v) / v : 0.0
+
+//══════════════════════════════════════════════════════════════════════════════
+// NICHE OSCILLATORS
+//══════════════════════════════════════════════════════════════════════════════
+var string G_NICHE = "22) Fisher · TRIX · DPO · Vortex · Elder · RVI · CRSI"
+fishLen = input.int(10, "Fisher length", minval=3, group=G_NICHE)
+fishExt = input.float(2.5, "Fisher extreme", minval=1.0, maxval=4.0, step=0.1, group=G_NICHE)
+hl2_f   = (high + low) / 2.0
+var float fishY = 0.0
+hL = ta.lowest(hl2_f, fishLen)
+hH = ta.highest(hl2_f, fishLen)
+rng = hH - hL
+val = rng > 0 ? 2.0 * ((hl2_f - hL) / rng - 0.5) : 0.0
+val := val > 0.999 ? 0.999 : val < -0.999 ? -0.999 : val
+fishY := 0.5 * math.log((1 + val) / (1 - val)) + 0.5 * nz(fishY[1])
+fish  = fishY
+
+trixLen = input.int(15, "TRIX EMA", minval=5, group=G_NICHE)
+trixE   = ta.ema(ta.ema(ta.ema(close, trixLen), trixLen), trixLen)
+trix    = trixE[1] != 0 ? 10000.0 * (trixE - trixE[1]) / trixE[1] : 0.0
+
+dpoLen = input.int(20, "DPO length", minval=3, group=G_NICHE)
+dpoSh  = math.round(dpoLen / 2.0) + 1
+dpo    = close - ta.sma(close, dpoLen)[dpoSh]
+
+vLen = input.int(14, "Vortex length", minval=2, group=G_NICHE)
+vmp  = math.abs(high - low[1])
+vmm  = math.abs(low - high[1])
+vstr = math.sum(ta.atr(1), vLen)
+vip  = vstr != 0 ? math.sum(vmp, vLen) / vstr : 1.0
+vim  = vstr != 0 ? math.sum(vmm, vLen) / vstr : 1.0
+
+eldLen = input.int(13, "Elder EMA", minval=1, group=G_NICHE)
+eldEma = ta.ema(close, eldLen)
+bullPw = high - eldEma
+bearPw = low - eldEma
+
+rviLen = input.int(10, "RVI SMA", minval=2, group=G_NICHE)
+rviNum = ta.sma((close - open) / (high - low + syminfo.mintick), rviLen)
+rviDen = ta.sma((close[1] - open[1]) / (high[1] - low[1] + syminfo.mintick), rviLen)
+rvi = rviDen != 0 ? rviNum / rviDen : 0.0
+
+crFast = input.int(3, "CRSI fast RSI", minval=2, maxval=5, group=G_NICHE)
+crF2   = input.int(2, "CRSI faster RSI", minval=2, maxval=5, group=G_NICHE)
+crOb   = input.float(75, "CRSI upper", minval=60, maxval=90, group=G_NICHE)
+crOs   = input.float(25, "CRSI lower", minval=10, maxval=40, group=G_NICHE)
+cRsi   = (ta.rsi(close, crFast) * 2.0 + ta.rsi(close, crF2)) / 3.0
+
+// Choppiness
+sumTR = math.sum(ta.tr(true), chopLen)
+hh_ll = ta.highest(high, chopLen) - ta.lowest(low, chopLen)
+chop  = hh_ll > 0 and chopLen > 1 ? 100.0 * math.log10(sumTR / hh_ll) / math.log10(chopLen) : 50.0
+
+//══════════════════════════════════════════════════════════════════════════════
+// Direction logic (inputs)
+//══════════════════════════════════════════════════════════════════════════════
+f_macd() =>
+    macdL > macdS and macdH >= macdH[1] ? 1 : macdL < macdS and macdH <= macdH[1] ? -1 : macdL > macdS ? 1 : macdL < macdS ? -1 : 0
+
+f_rsi() =>
+    rsi >= rsiOb ? -1 : rsi <= rsiOs ? 1 : rsi > rsiHi ? 1 : rsi < rsiLo ? -1 : 0
+
+f_kama() =>
+    close > kama and kama >= kama[1] ? 1 : close < kama and kama <= kama[1] ? -1 : close > kama ? 1 : close < kama ? -1 : 0
+
+f_bb() =>
+    pctB < bbPctLo ? 1 : pctB > bbPctHi ? -1 : close > bbMid ? 1 : close < bbMid ? -1 : 0
+
+f_stoch() =>
+    stK > stD and stK < stMidH ? 1 : stK < stD and stK > stMid ? -1 : stK <= stOs ? 1 : stK >= stOb ? -1 : 0
+
+f_cci() =>
+    cci > cciOb ? -1 : cci < -cciOs ? 1 : cci > 0 ? 1 : cci < 0 ? -1 : 0
+
+f_wpr() =>
+    wpr > -wprOb ? -1 : wpr < -wprOs ? 1 : wpr > -50 ? 1 : -1
+
+f_mfi() =>
+    mfi > mfiOb ? -1 : mfi < mfiOs ? 1 : mfi > 50 ? 1 : mfi < 50 ? -1 : 0
+
+f_adxDi() =>
+    adx < adxMin ? 0 : dip > dim ? 1 : dip < dim ? -1 : 0
+
+f_ppo() =>
+    ppo > ppo[1] and ppo > 0 ? 1 : ppo < ppo[1] and ppo < 0 ? -1 : ppo > ppo[1] ? 1 : ppo < ppo[1] ? -1 : 0
+
+f_ao() =>
+    ao > 0 and ao > ao[1] ? 1 : ao < 0 and ao < ao[1] ? -1 : ao > 0 ? 1 : ao < 0 ? -1 : 0
+
+f_uo() =>
+    uo < uoLo ? 1 : uo > uoHi ? -1 : uo > 50 ? 1 : -1
+
+f_efi() =>
+    efi > efi[1] and efi > 0 ? 1 : efi < efi[1] and efi < 0 ? -1 : efi > 0 ? 1 : efi < 0 ? -1 : 0
+
+f_obv() =>
+    obvSl > 0 ? 1 : obvSl < 0 ? -1 : 0
+
+f_tsiRoc() =>
+    tsi > 0 and roc > 0 ? 1 : tsi < 0 and roc < 0 ? -1 : tsi > 0 ? 1 : tsi < 0 ? -1 : 0
+
+f_cmo() =>
+    cmo > cmoTh ? 1 : cmo < -cmoTh ? -1 : cmo > 0 ? 1 : cmo < 0 ? -1 : 0
+
+f_srsi() =>
+    srsiK < srOs ? 1 : srsiK > srOb ? -1 : srsiK > srsiK[1] ? 1 : srsiK < srsiK[1] ? -1 : 0
+
+f_vwap() =>
+    math.abs(vwapPct) < vwapIgn ? 0 : vwapPct > 0 ? 1 : -1
+
+f_fisher() =>
+    fish > fish[1] and fish < fishExt ? 1 : fish < fish[1] and fish > -fishExt ? -1 : fish > fishExt - 0.5 ? -1 : fish < -fishExt + 0.5 ? 1 : fish > 0 ? 1 : fish < 0 ? -1 : 0
+
+f_trix() =>
+    trix > trix[1] ? 1 : trix < trix[1] ? -1 : 0
+
+f_dpo() =>
+    dpo > 0 and dpo > dpo[1] ? 1 : dpo < 0 and dpo < dpo[1] ? -1 : dpo > 0 ? 1 : dpo < 0 ? -1 : 0
+
+f_vortex() =>
+    vip > vim ? 1 : vip < vim ? -1 : 0
+
+f_elder() =>
+    bullPw > 0 and bullPw > bearPw[1] ? 1 : bearPw < 0 and bearPw < bullPw[1] ? -1 : bullPw > bearPw ? 1 : bullPw < bearPw ? -1 : 0
+
+f_rvi() =>
+    rvi > rvi[1] and rvi > 0 ? 1 : rvi < rvi[1] and rvi < 0 ? -1 : rvi > 0 ? 1 : rvi < 0 ? -1 : 0
+
+f_crsi() =>
+    cRsi < crOs ? 1 : cRsi > crOb ? -1 : cRsi > 50 ? 1 : cRsi < 50 ? -1 : 0
+
+f_erKama() =>
+    er > erMin ? (close > kama ? 1 : -1) : 0
+
+cw(dir, w) =>
+    w <= 0 or dir == 0 ? 0.0 : dir * w
+
+d_macd = f_macd()
+d_rsi  = f_rsi()
+d_kama = f_kama()
+d_bb   = f_bb()
+d_st   = f_stoch()
+d_cci  = f_cci()
+d_wpr  = f_wpr()
+d_mfi  = f_mfi()
+d_adx  = f_adxDi()
+d_ppo  = f_ppo()
+d_ao   = f_ao()
+d_uo   = f_uo()
+d_efi  = f_efi()
+d_obv  = f_obv()
+d_tr   = f_tsiRoc()
+d_cmo  = f_cmo()
+d_sr   = f_srsi()
+d_vw   = f_vwap()
+d_fish = f_fisher()
+d_trx  = f_trix()
+d_dpo  = f_dpo()
+d_vtx  = f_vortex()
+d_eld  = f_elder()
+d_rvi  = f_rvi()
+d_cr   = f_crsi()
+d_sqzF = sqzFire ? 1 : 0
+d_er   = f_erKama()
+
+c1  = cw(d_macd, w_macd)
+c2  = cw(d_rsi, w_rsi)
+c3  = cw(d_kama, w_kama)
+c4  = cw(d_bb, w_bb)
+c5  = cw(d_st, w_st)
+c6  = cw(d_cci, w_cci)
+c7  = cw(d_wpr, w_wpr)
+c8  = cw(d_mfi, w_mfi)
+c9  = cw(d_adx, w_adx)
+c10 = cw(d_ppo, w_ppo)
+c11 = cw(d_ao, w_ao)
+c12 = cw(d_uo, w_uo)
+c13 = cw(d_efi, w_efi)
+c14 = cw(d_obv, w_obv)
+c15 = cw(d_tr, w_tr)
+c16 = cw(d_cmo, w_cmo)
+c17 = cw(d_sr, w_sr)
+c18 = cw(d_vw, w_vw)
+c19 = cw(d_fish, w_fish)
+c20 = cw(d_trx, w_trx)
+c21 = cw(d_dpo, w_dpo)
+c22 = cw(d_vtx, w_vtx)
+c23 = cw(d_eld, w_eld)
+c24 = cw(d_rvi, w_rvi)
+c25 = cw(d_cr, w_cr)
+c26 = w_sqzF > 0 and d_sqzF == 1 ? w_sqzF : 0.0
+c27 = cw(d_er, w_er)
+
+netRaw = c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8 + c9 + c10 + c11 + c12 + c13 + c14 + c15 + c16 + c17 + c18 + c19 + c20 + c21 + c22 + c23 + c24 + c25 + c26 + c27
+f_wt(float x) =>
+    x > 0 ? x : 0.0
+maxW = f_wt(w_macd) + f_wt(w_rsi) + f_wt(w_kama) + f_wt(w_bb) + f_wt(w_st) + f_wt(w_cci) + f_wt(w_wpr) + f_wt(w_mfi) + f_wt(w_adx) + f_wt(w_ppo) + f_wt(w_ao) + f_wt(w_uo) + f_wt(w_efi) + f_wt(w_obv) + f_wt(w_tr) + f_wt(w_cmo) + f_wt(w_sr) + f_wt(w_vw) + f_wt(w_fish) + f_wt(w_trx) + f_wt(w_dpo) + f_wt(w_vtx) + f_wt(w_eld) + f_wt(w_rvi) + f_wt(w_cr) + f_wt(w_sqzF) + f_wt(w_er)
+netPct = maxW > 0 ? 100.0 * netRaw / maxW : 0.0
+netAdj = useChopDamp and chop > chopHi ? netPct * 0.55 : netPct
+
+// Swing DIP / PEAK — density preset vs custom
+isSwingCust = swingDensity == "Custom (inputs below)"
+isSwingSparse = swingDensity == "Sparse (few majors)"
+isSwingBal = swingDensity == "Balanced"
+isSwingMore = swingDensity == "More (medium swings)"
+effDL = isSwingCust ? dipLeft : isSwingSparse ? 8 : isSwingBal ? 5 : 4
+effDR = isSwingCust ? dipRight : effDL
+effPL = isSwingCust ? peakLeft : effDL
+effPR = isSwingCust ? peakRight : effDL
+effMinSwing = isSwingCust ? minBarsSwing : isSwingSparse ? 28 : isSwingBal ? 14 : 10
+effDipRsi = isSwingCust ? dipRsiMax : isSwingSparse ? 38.0 : isSwingBal ? 45.0 : 48.0
+effPeakRsi = isSwingCust ? peakRsiMin : isSwingSparse ? 62.0 : isSwingBal ? 55.0 : 52.0
+effDipNet = isSwingCust ? dipNetMax : isSwingSparse ? 10.0 : isSwingBal ? 22.0 : 30.0
+effPeakNet = isSwingCust ? peakNetMin : isSwingSparse ? -10.0 : isSwingBal ? -22.0 : -30.0
+effDipBB = isSwingCust ? dipNearBB : isSwingMore ? false : true
+effPeakBB = isSwingCust ? peakNearBB : isSwingMore ? false : true
+effBbLoMul = isSwingSparse ? 1.006 : isSwingBal ? 1.016 : 1.028
+effBbHiMul = isSwingSparse ? 0.994 : isSwingBal ? 0.984 : 0.972
+effBlockChop = isSwingCust ? noChopSwing : isSwingMore ? false : true
+
+// Swing DIP / PEAK (after rsi, bb, chop, netAdj exist)
+plSwing = ta.pivotlow(low, effDL, effDR)
+phSwing = ta.pivothigh(high, effPL, effPR)
+chOkSwing = not effBlockChop or not useChopDamp or chop[effDR] < chopHi
+chOkPeak = not effBlockChop or not useChopDamp or chop[effPR] < chopHi
+dipRaw = not na(plSwing) and chOkSwing and rsi[effDR] <= effDipRsi and netAdj[effDR] <= effDipNet and (not effDipBB or low[effDR] <= bbL[effDR] * effBbLoMul)
+peakRaw = not na(phSwing) and chOkPeak and rsi[effPR] >= effPeakRsi and netAdj[effPR] >= effPeakNet and (not effPeakBB or high[effPR] >= bbU[effPR] * effBbHiMul)
+
+var int lastSwingBar = na
+var float lastDipLowPx = na
+var float maxHighAfterDip = na
+barsSince = na(lastSwingBar) ? 999 : bar_index - lastSwingBar
+if barstate.isconfirmed and dipNoKnife and not na(lastDipLowPx)
+    maxHighAfterDip := na(maxHighAfterDip) ? high : math.max(maxHighAfterDip, high)
+bounceOk = not dipNoKnife or na(lastDipLowPx) or maxHighAfterDip >= lastDipLowPx * (1.0 + dipBouncePct / 100.0)
+bearKnife = dipNoKnife and close[effDR] < kama[effDR] and kama[effDR] < nz(kama[effDR + 5], kama[effDR])
+dipBearOk = not bearKnife or rsi[effDR] <= dipBearRsiMax
+
+dipOkBase = dipRaw and (barsSince >= effMinSwing) and bounceOk and dipBearOk
+peakOkBase = peakRaw and (barsSince >= effMinSwing)
+var bool peakUntilDip = false
+peakGate = not swingAlternate or not peakUntilDip
+dipOk = dipOkBase
+peakOk = peakOkBase and peakGate and not dipOkBase
+if barstate.isconfirmed
+    if dipOk
+        lastSwingBar := bar_index
+        if dipNoKnife
+            lastDipLowPx := low[effDR]
+            maxHighAfterDip := na
+        if swingAlternate
+            peakUntilDip := false
+    else if peakOk
+        lastSwingBar := bar_index
+        if swingAlternate
+            peakUntilDip := true
+swingOk = not sigOnClose or barstate.isconfirmed
+showDip = showSwing and sigMode == "Swing DIP / PEAK" and swingOk and barstate.isconfirmed and dipOk
+showPeak = showSwing and sigMode == "Swing DIP / PEAK" and swingOk and barstate.isconfirmed and peakOk
+
+string verdict = ""
+color verdictCol = color.gray
+if netAdj >= thStrongBuy
+    verdict := "STRONG BUY"
+    verdictCol := color.new(#00e676, 0)
+else if netAdj >= thBuy
+    verdict := "BUY"
+    verdictCol := color.new(#69f0ae, 0)
+else if netAdj <= thStrongSell
+    verdict := "STRONG SELL"
+    verdictCol := color.new(#ff1744, 0)
+else if netAdj <= thSell
+    verdict := "SELL"
+    verdictCol := color.new(#ff8a80, 0)
+else
+    verdict := "WAIT"
+    verdictCol := color.new(#ffd54f, 0)
+
+if useChopDamp and chop > chopHi and math.abs(netAdj) < thBuy
+    verdict := verdict + " · range"
+chopNote = useChopDamp and chop > chopHi ? " (Chop)" : ""
+
+// Signal tier: 2 SB 1 B 0 -1 S -2 SS
+sigCat(float n) =>
+    n >= thStrongBuy ? 2 : n >= thBuy ? 1 : n <= thStrongSell ? -2 : n <= thSell ? -1 : 0
+
+catNow  = sigCat(netAdj)
+catPrev = sigCat(nz(netAdj[1], 0))
+okSig   = not sigOnClose or barstate.isconfirmed
+chOk    = not sigChangeOnly or catNow != catPrev
+
+wantSB = showAlSat and okSig and chOk and catNow == 2 and catPrev < 2
+wantB  = showAlSat and okSig and chOk and catNow == 1 and catPrev < 1
+wantSS = showAlSat and okSig and chOk and catNow == -2 and catPrev > -2
+wantS  = showAlSat and okSig and chOk and catNow == -1 and catPrev > -1
+
+var bool cInLong = false
+var bool cInShort = false
+netCrossExitLong = netAdj < exitLongNet and nz(netAdj[1], exitLongNet + 50) >= exitLongNet
+tierExitLong = catNow == 0 and catPrev >= 1
+netCrossExitShort = netAdj > -exitLongNet and nz(netAdj[1], -exitLongNet - 50) <= -exitLongNet
+tierExitShort = catNow == 0 and catPrev <= -1
+exitLong = consPosDisc and cInLong and okSig and not wantS and not wantSS and (ta.crossunder(close, kama) or netCrossExitLong or tierExitLong)
+exitShort = consPosDisc and cInShort and okSig and not wantB and not wantSB and (ta.crossover(close, kama) or netCrossExitShort or tierExitShort)
+
+entSB = wantSB and (not consPosDisc or not cInLong or cInLong and catPrev == 1)
+entB  = wantB and (not consPosDisc or not cInLong)
+entSS = wantSS and (not consPosDisc or not cInShort or cInShort and catPrev == -1)
+entS  = wantS and (not consPosDisc or not cInShort)
+
+if barstate.isconfirmed and consPosDisc
+    if cInLong
+        if wantS or wantSS
+            cInLong := false
+            cInShort := true
+        else if exitLong
+            cInLong := false
+    else if cInShort
+        if wantB or wantSB
+            cInShort := false
+            cInLong := true
+        else if exitShort
+            cInShort := false
+    else
+        if wantSB or wantB
+            cInLong := true
+        else if wantSS or wantS
+            cInShort := true
+
+//══════════════════════════════════════════════════════════════════════════════
+// CHART LINES
+//══════════════════════════════════════════════════════════════════════════════
+var string G_VIS = "23) Lines · BB"
+showBBFill = input.bool(true, "BB fill", group=G_VIS)
+showMacdX  = input.bool(false, "MACD cross marks", group=G_VIS)
+
+// Lower oscillators (single script — Pine has no extra panes; drawn as strips at chart bottom)
+var string G_OSC = "26) RSI · MACD · Stoch (bottom strips)"
+showOsc    = input.bool(true, "Show 3 oscillator strips under price", group=G_OSC)
+oscLb      = input.int(320, "Vertical range lookback (bars)", minval=50, maxval=2000, group=G_OSC)
+oscStrip   = input.float(5.0, "Strip height (% of H-L range)", minval=2, maxval=12, step=0.5, group=G_OSC)
+oscGap     = input.float(1.2, "Gap between strips (% of range)", minval=0.3, maxval=4, step=0.1, group=G_OSC)
+oscFromBot = input.float(1.0, "Padding from range low (%)", minval=0.2, maxval=8, step=0.1, group=G_OSC)
+
+oscHH = ta.highest(high, oscLb)
+oscLL = ta.lowest(low, oscLb)
+oscSP = math.max(oscHH - oscLL, close * 0.015)
+fPct(float p) =>
+    oscLL + oscSP * (p / 100.0)
+
+stripH = oscStrip / 100.0
+gapH = oscGap / 100.0
+// RSI strip
+yR0 = fPct(oscFromBot)
+yR1 = yR0 + oscSP * stripH
+yRsi = yR0 + rsi / 100.0 * (yR1 - yR0)
+yRsi30 = yR0 + rsiOs / 100.0 * (yR1 - yR0)
+yRsi70 = yR0 + rsiOb / 100.0 * (yR1 - yR0)
+// Stoch strip
+yS0 = yR1 + oscSP * gapH
+yS1 = yS0 + oscSP * stripH
+yStK = yS0 + stK / 100.0 * (yS1 - yS0)
+yStD = yS0 + stD / 100.0 * (yS1 - yS0)
+ySt20 = yS0 + stOs / 100.0 * (yS1 - yS0)
+ySt80 = yS0 + stOb / 100.0 * (yS1 - yS0)
+// MACD strip (scaled to strip)
+yM0 = yS1 + oscSP * gapH
+yM1 = yM0 + oscSP * stripH
+yMmid = (yM0 + yM1) / 2.0
+yMhalf = (yM1 - yM0) * 0.42
+mAbs = ta.highest(math.max(math.max(math.abs(macdL), math.abs(macdS)), math.abs(macdH)), 100)
+mAbs := na(mAbs) or mAbs < syminfo.mintick ? 1.0 : mAbs
+yMacdL = yMmid + (macdL / mAbs) * yMhalf
+yMacdS = yMmid + (macdS / mAbs) * yMhalf
+yMacdH = yMmid + (macdH / mAbs) * yMhalf
+
+plot(kama, "KAMA", color=kama >= kama[1] ? color.lime : color.red, linewidth=2)
+pU = plot(bbU, color=color.new(color.red, 45))
+pL = plot(bbL, color=color.new(color.red, 45))
+pM = plot(bbMid, color=color.new(color.teal, 35))
+fill(pU, pL, showBBFill ? (showSqz and sqz ? color.new(color.orange, 88) : color.new(color.purple, 92)) : na)
+bgcolor(showSqz and sqz ? color.new(color.orange, 94) : na)
+bgcolor(zoneBg and catNow >= 1 ? color.new(color.green, 92) : zoneBg and catNow <= -1 ? color.new(color.red, 92) : na)
+
+plotshape(showMacdX and ta.crossover(macdL, macdS), "M+", shape.cross, location.belowbar, color.new(color.lime, 30), size=size.tiny)
+plotshape(showMacdX and ta.crossunder(macdL, macdS), "M-", shape.cross, location.abovebar, color.new(color.red, 30), size=size.tiny)
+
+plotshape(showDip, "DIP", shape.diamond, location.belowbar, color.new(#00e676, 0), offset=-effDR, size=size.normal)
+plotshape(showPeak, "PEAK", shape.diamond, location.abovebar, color.new(#ff1744, 0), offset=-effPR, size=size.normal)
+
+plotshape(showAlSat and entSB, "SB", shape.triangleup, location.belowbar, color.new(#00c853, 0), size=size.small)
+plotshape(showAlSat and entB and not entSB, "BUY", shape.triangleup, location.belowbar, color.new(#76ff03, 0), size=size.tiny)
+plotshape(showAlSat and entSS, "SS", shape.triangledown, location.abovebar, color.new(#d50000, 0), size=size.small)
+plotshape(showAlSat and entS and not entSS, "SELL", shape.triangledown, location.abovebar, color.new(#ff5252, 0), size=size.tiny)
+plotshape(showAlSat and showExitLbl and exitLong, "EXIT", shape.xcross, location.abovebar, color.new(#ff9100, 0), size=size.small)
+plotshape(showAlSat and showExitLbl and exitShort, "EXIT+", shape.xcross, location.belowbar, color.new(#ff9100, 0), size=size.small)
+
+if showAlSatLbl and showDip and barstate.isconfirmed
+    label.new(bar_index - effDR, low[effDR], "DIP\n(swing low)", style=label.style_label_up, color=color.new(#004d40, 20), textcolor=color.white, size=lblSz)
+if showAlSatLbl and showPeak and barstate.isconfirmed
+    label.new(bar_index - effPR, high[effPR], "PEAK\n(swing high)", style=label.style_label_down, color=color.new(#b71c1c, 20), textcolor=color.white, size=lblSz)
+if showAlSatLbl and showAlSat and okSig and chOk
+    if entSB
+        label.new(bar_index, low, "STRONG BUY\n" + str.tostring(netAdj, "#.#") + "%", style=label.style_label_up, color=color.new(#00c853, 15), textcolor=color.white, size=lblSz)
+    if entB and not entSB
+        label.new(bar_index, low, "BUY\n" + str.tostring(netAdj, "#.#") + "%", style=label.style_label_up, color=color.new(#69f0ae, 25), textcolor=color.black, size=lblSz)
+    if entSS
+        label.new(bar_index, high, "STRONG SELL\n" + str.tostring(netAdj, "#.#") + "%", style=label.style_label_down, color=color.new(#d50000, 15), textcolor=color.white, size=lblSz)
+    if entS and not entSS
+        label.new(bar_index, high, "SELL\n" + str.tostring(netAdj, "#.#") + "%", style=label.style_label_down, color=color.new(#ff8a80, 25), textcolor=color.black, size=lblSz)
+if showAlSatLbl and showAlSat and showExitLbl and exitLong and barstate.isconfirmed
+    label.new(bar_index, high, "EXIT\n(stop / trim)\n" + str.tostring(netAdj, "#.#") + "%", style=label.style_label_down, color=color.new(#e65100, 15), textcolor=color.white, size=lblSz)
+if showAlSatLbl and showAlSat and showExitLbl and exitShort and barstate.isconfirmed
+    label.new(bar_index, low, "EXIT SHORT\n(cover)\n" + str.tostring(netAdj, "#.#") + "%", style=label.style_label_up, color=color.new(#e65100, 15), textcolor=color.white, size=lblSz)
+
+// Strips: RSI (purple), Stoch K/D (blue/orange), MACD + hist (green/red fill)
+plot(showOsc ? yRsi : na, "RSI (strip)", color=color.new(#ab47bc, 0), linewidth=2)
+plot(showOsc ? yRsi30 : na, "RSI OS lvl", color=color.new(#66bb6a, 60), linewidth=1, style=plot.style_circles)
+plot(showOsc ? yRsi70 : na, "RSI OB lvl", color=color.new(#ef5350, 60), linewidth=1, style=plot.style_circles)
+plot(showOsc ? yStK : na, "Stoch %K", color=color.new(#42a5f5, 0), linewidth=2)
+plot(showOsc ? yStD : na, "Stoch %D", color=color.new(#ff9800, 0), linewidth=1)
+plot(showOsc ? ySt20 : na, "Stoch OS", color=color.new(#66bb6a, 70), linewidth=1)
+plot(showOsc ? ySt80 : na, "Stoch OB", color=color.new(#ef5350, 70), linewidth=1)
+pMz = plot(showOsc ? yMmid : na, display=display.none)
+pMh = plot(showOsc ? yMacdH : na, display=display.none)
+fill(pMz, pMh, showOsc ? (macdH >= 0 ? color.new(#26a69a, 55) : color.new(#ef5350, 55)) : na, "MACD hist")
+plot(showOsc ? yMacdL : na, "MACD line", color=color.new(#2962ff, 0), linewidth=2)
+plot(showOsc ? yMacdS : na, "MACD sig", color=color.new(#ff6d00, 0), linewidth=1)
+plot(showOsc ? yMmid : na, "MACD zero", color=color.new(color.gray, 75), linewidth=1, style=plot.style_circles)
+
+//══════════════════════════════════════════════════════════════════════════════
+// TABLE
+//══════════════════════════════════════════════════════════════════════════════
+var string G_TBL = "24) Dashboard"
+showTbl = input.bool(true, "Top-right table", group=G_TBL)
+
+var table tb = table.new(position.top_right, 3, 32, bgcolor=color.new(#0d1117, 8), border_color=color.new(#30363d, 0), frame_color=color.new(#58a6ff, 60), frame_width=1)
+
+f_status(float x) =>
+    x > 0.001 ? "BULL" : x < -0.001 ? "BEAR" : "NEUT"
+f_sc(float x) =>
+    x > 0 ? "+" + str.tostring(x, "#.#") : x < 0 ? str.tostring(x, "#.#") : "0"
+f_col(float x) =>
+    x > 0 ? color.new(#3fb950, 0) : x < 0 ? color.new(#f85149, 0) : color.new(#8b949e, 0)
+
+analizSatir(int r, string nm, float cf) =>
+    table.cell(tb, 0, r, nm, text_color=color.new(#8b949e, 0), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(tb, 1, r, f_status(cf), text_color=f_col(cf), text_size=size.tiny)
+    table.cell(tb, 2, r, f_sc(cf), text_color=f_col(cf), text_size=size.tiny)
+
+if barstate.islast and showTbl
+    table.cell(tb, 0, 0, "TRADDY", text_color=color.white, text_size=size.small, bgcolor=color.new(#21262d, 0))
+    table.cell(tb, 1, 0, "Side", text_color=color.gray, text_size=size.tiny, bgcolor=color.new(#21262d, 0))
+    table.cell(tb, 2, 0, "Pts", text_color=color.gray, text_size=size.tiny, bgcolor=color.new(#21262d, 0))
+    analizSatir(1, "MACD", c1)
+    analizSatir(2, "RSI", c2)
+    analizSatir(3, "KAMA", c3)
+    analizSatir(4, "Bollinger", c4)
+    analizSatir(5, "Stochastic", c5)
+    analizSatir(6, "CCI", c6)
+    analizSatir(7, "Williams %R", c7)
+    analizSatir(8, "MFI", c8)
+    analizSatir(9, "ADX/DI", c9)
+    analizSatir(10, "PPO", c10)
+    analizSatir(11, "Awesome Osc", c11)
+    analizSatir(12, "Ultimate Osc", c12)
+    analizSatir(13, "Force Idx", c13)
+    analizSatir(14, "OBV", c14)
+    analizSatir(15, "TSI+ROC", c15)
+    analizSatir(16, "CMO", c16)
+    analizSatir(17, "StochRSI", c17)
+    analizSatir(18, "VWAP%", c18)
+    analizSatir(19, "Fisher", c19)
+    analizSatir(20, "TRIX", c20)
+    analizSatir(21, "DPO", c21)
+    analizSatir(22, "Vortex", c22)
+    analizSatir(23, "Elder Ray", c23)
+    analizSatir(24, "RVI", c24)
+    analizSatir(25, "Connors-RSI*", c25)
+    table.cell(tb, 0, 26, "Squeeze pop", text_color=color.new(#8b949e, 0), text_size=size.tiny)
+    table.cell(tb, 1, 26, d_sqzF == 1 ? "BULL" : "—", text_color=d_sqzF == 1 ? color.lime : color.gray, text_size=size.tiny)
+    table.cell(tb, 2, 26, c26 > 0 ? "+" + str.tostring(c26, "#.#") : "0", text_color=d_sqzF == 1 ? color.lime : color.gray, text_size=size.tiny)
+    analizSatir(27, "KAMA ER", c27)
+    table.cell(tb, 0, 28, "NET %", text_color=color.white, text_size=size.tiny, bgcolor=color.new(#161b22, 0))
+    table.cell(tb, 1, 28, str.tostring(netAdj, "#.#") + chopNote, text_color=netAdj > 0 ? color.lime : netAdj < 0 ? color.red : color.gray, text_size=size.tiny, bgcolor=color.new(#161b22, 0))
+    table.cell(tb, 2, 28, str.tostring(chop, "#.#"), text_color=chop > chopHi ? color.orange : color.gray, text_size=size.tiny, bgcolor=color.new(#161b22, 0))
+    table.merge_cells(tb, 0, 29, 2, 29)
+    table.cell(tb, 0, 29, verdict, text_color=color.black, text_size=size.normal, bgcolor=verdictCol, text_halign=text.align_center)
+
+//══════════════════════════════════════════════════════════════════════════════
+// ALERTS
+//══════════════════════════════════════════════════════════════════════════════
+var string G_AL = "25) Alerts"
+alDip      = input.bool(true, "DIP (swing low)", group=G_AL)
+alPeak     = input.bool(true, "PEAK (swing high)", group=G_AL)
+alGucluAl  = input.bool(false, "STRONG BUY (consensus)", group=G_AL)
+alGucluSat = input.bool(false, "STRONG SELL (consensus)", group=G_AL)
+alAl       = input.bool(false, "BUY (consensus)", group=G_AL)
+alSat      = input.bool(false, "SELL (consensus)", group=G_AL)
+alExit     = input.bool(true, "EXIT (stop / trim long or short)", group=G_AL)
+
+alertcondition(alDip and barstate.isconfirmed and dipOk and sigMode == "Swing DIP / PEAK", "TRADDY — DIP", "Possible swing low (dip)")
+alertcondition(alPeak and barstate.isconfirmed and peakOk and not dipOk and sigMode == "Swing DIP / PEAK", "TRADDY — PEAK", "Possible swing high (peak)")
+alertcondition(alGucluAl and barstate.isconfirmed and entSB, "TRADDY — STRONG BUY", "Strong buy signal")
+alertcondition(alGucluSat and barstate.isconfirmed and entSS, "TRADDY — STRONG SELL", "Strong sell signal")
+alertcondition(alAl and barstate.isconfirmed and entB and not entSB, "TRADDY — BUY", "Buy signal")
+alertcondition(alSat and barstate.isconfirmed and entS and not entSS, "TRADDY — SELL", "Sell signal")
+alertcondition(alExit and barstate.isconfirmed and showAlSat and showExitLbl and (exitLong or exitShort), "TRADDY — EXIT", "Exit / trim — KAMA cross or score faded")

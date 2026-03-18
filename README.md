@@ -4,7 +4,7 @@ TradingView **Pine Script v5** overlay: KAMA, Bollinger, squeeze, a **weighted m
 
 ![Traddy](Traddy.png)
 
-## Features (summary)
+## Features 
 
 ### Consensus score
 - Many inputs (MACD, RSI, KAMA, BB, Stoch, CCI, MFI, ADX, PPO, AO, UO, EFI, OBV, TSI/ROC, CMO, StochRSI, VWAP%, Fisher, TRIX, DPO, Vortex, Elder Ray, RVI, Connors-style RSI, squeeze pop, KAMA ER) each vote **BULL / BEAR / NEUT** with **weights** (group 3; weight **0** = off).
